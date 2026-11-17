@@ -13,6 +13,7 @@ import { parseMoney } from '../shared/quote.ts';
 import { extractInquiry, type AppConfig } from './ai.ts';
 import { createQuote, HttpError, readRecord, readRecords, transaction } from './store.ts';
 import { seedDemo } from './demo.ts';
+import { authRouter } from './auth.ts';
 
 const csvProductSchema = productInputSchema.omit({ priceCents: true }).extend({
   price: z.string().regex(/^\d{1,7}(\.\d{1,2})?$/, '价格必须为非负金额，最多两位小数')
@@ -23,6 +24,10 @@ export function createApp(db: DatabaseSync, config: AppConfig) {
   const app = express();
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.get('X-Inquiry-Request') !== '1') {
+      throw new HttpError(403, '请求来源验证失败，请通过工作台操作');
+    }
     if (['POST', 'PUT', 'PATCH'].includes(req.method) && !req.is('application/json')) {
       res.status(415).json({ error: '请使用 application/json 提交数据' });
       return;
@@ -30,6 +35,7 @@ export function createApp(db: DatabaseSync, config: AppConfig) {
     next();
   });
   app.use(express.json({ limit: '2mb' }));
+  app.use('/api', authRouter(db));
 
   app.get('/api/state', (_req, res) => {
     const state: AppState = {

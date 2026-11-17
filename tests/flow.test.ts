@@ -5,8 +5,15 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { selectQuotes } from '../src/quote-selection.ts';
+import { Quotes } from '../src/pages/Quotes.tsx';
+import { Inquiries, FollowUps } from '../src/pages/Inquiries.tsx';
+import { InquiryDetail } from '../src/pages/InquiryDetail.tsx';
 import { createApp } from '../server/app.ts';
 import { createDatabase } from '../server/db.ts';
+import type { SessionState } from '../shared/auth.ts';
 import type { AppState, FollowUp, Inquiry, InquiryInput, Product, Quote, QuoteInput } from '../shared/domain.ts';
 
 const productInput = { sku: 'BR-6204', name: '深沟球轴承', specification: '6204-2RS / 20×47×14 mm', unit: '件', priceCents: 1990 };
@@ -25,10 +32,18 @@ async function startApp(t: TestContext, path = ':memory:') {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     db.close();
   });
+  const session = await fetch(`${base}/api/auth/session`).then(response => response.json()) as SessionState;
+  const login = await fetch(`${base}/api/auth/${session.setupRequired ? 'setup' : 'login'}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Inquiry-Request': '1' },
+    body: JSON.stringify({ username: 'test-admin', displayName: '测试管理员', password: 'test-password-123' }),
+  });
+  assert.equal(login.status, session.setupRequired ? 201 : 200);
+  const cookie = login.headers.getSetCookie()[0].split(';')[0];
   return async <T>(path: string, method = 'GET', body?: unknown) => {
     const response = await fetch(`${base}/api${path}`, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Inquiry-Request': '1', Cookie: cookie },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as T };
@@ -212,4 +227,62 @@ test('演示数据仅按用户操作载入空数据库，重复载入不改变�
   assert.ok(state.quotes.length > 0);
   assert.equal((await call('/demo', 'POST', {})).status, 409);
   assert.deepEqual((await call<AppState>('/state')).body, state);
+});
+
+
+test('待发送仅包含进行中询盘的最新未发送版本，列表保留完整历史', async t => {
+  const call = await startApp(t);
+  const product = (await call<Product>('/products', 'POST', productInput)).body;
+  const active = (await call<Inquiry>('/inquiries', 'POST', inquiryInput)).body;
+  const won = (await call<Inquiry>('/inquiries', 'POST', { ...inquiryInput, status: 'won' })).body;
+  const lost = (await call<Inquiry>('/inquiries', 'POST', { ...inquiryInput, status: 'lost' })).body;
+  const input = {
+    inquiryId: active.id, sellerName: '配件商', validUntil: '2027-01-31', taxIncluded: true,
+    notes: '', shippingCents: 0, items: [{ productId: product.id, quantity: 1, unitPriceCents: 1990 }],
+  };
+  const old = (await call<Quote>('/quotes', 'POST', input)).body;
+  const latest = (await call<Quote>('/quotes', 'POST', input)).body;
+  await call('/quotes', 'POST', { ...input, inquiryId: won.id });
+  await call('/quotes', 'POST', { ...input, inquiryId: lost.id });
+  const data = (await call<AppState>('/state')).body;
+  assert.deepEqual([...selectQuotes(data).pending], [latest.id]);
+  assert.equal(selectQuotes({ ...data, quotes: [...data.quotes].reverse() }).latest.get(active.id)?.id, latest.id);
+  const pending = renderToStaticMarkup(createElement(Quotes, { data, initialFilter: 'unsent' }));
+  assert.match(pending, new RegExp(`href="#quote/${latest.id}"`));
+  assert.doesNotMatch(pending, new RegExp(`href="#quote/${old.id}"`));
+  assert.equal((pending.match(/class="quote-code"/g) ?? []).length, 1);
+  assert.equal((renderToStaticMarkup(createElement(Quotes, { data })).match(/class="quote-code"/g) ?? []).length, 4);
+  await call(`/quotes/${latest.id}/sent`, 'POST', {});
+  assert.equal(selectQuotes((await call<AppState>('/state')).body).pending.size, 0);
+});
+
+test('询盘筛选和今日跟进只渲染对应客户', async t => {
+  const call = await startApp(t);
+  await call('/demo', 'POST', {});
+  const data = (await call<AppState>('/state')).body;
+  const won = renderToStaticMarkup(createElement(Inquiries, { data, initialFilter: 'won' }));
+  assert.match(won, /云帆制造/);
+  assert.doesNotMatch(won, /恒川自动化|青禾包装设备/);
+  const due = renderToStaticMarkup(createElement(FollowUps, { data, dueOnly: true }));
+  assert.match(due, /恒川自动化/);
+  assert.match(due, /启明精工/);
+  assert.doesNotMatch(due, /青禾包装设备|新程机电|云帆制造/);
+});
+
+test('空搜索不展开整个商品目录，型号候选优先精确匹配并保留已选商品', async t => {
+  const call = await startApp(t);
+  await call('/demo', 'POST', {});
+  const data = (await call<AppState>('/state')).body;
+  const inquiry = data.inquiries.find(item => item.id === 'demo-i4')!;
+  data.products = Array.from({ length: 5000 }, (_, index) => ({
+    ...data.products[0], id: `product-${index}`, sku: `MODEL-${index}`, specification: '',
+  }));
+  inquiry.items[0] = { ...inquiry.items[0], model: '', productId: 'product-4999' };
+  const empty = renderToStaticMarkup(createElement(InquiryDetail, { data, inquiry, isNew: false, refresh: async () => {} }));
+  assert.match(empty, /value="product-4999"/);
+  assert.doesNotMatch(empty, /value="product-0"/);
+  inquiry.items[0] = { ...inquiry.items[0], model: ' model-49 ', productId: null };
+  const matched = renderToStaticMarkup(createElement(InquiryDetail, { data, inquiry, isNew: false, refresh: async () => {} }));
+  assert.equal((matched.match(/<option value="product-/g) ?? []).length, 3);
+  assert.ok(matched.indexOf('<option value="product-49"') < matched.indexOf('<option value="product-490"'));
 });

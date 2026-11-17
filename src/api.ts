@@ -3,8 +3,9 @@ import { useState } from 'react';
 export async function api<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
   const response = await fetch(`/api${path}`, body === undefined
     ? { method: 'GET' }
-    : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    : { method, headers: { 'Content-Type': 'application/json', 'X-Inquiry-Request': '1' }, body: JSON.stringify(body) });
   if (!response.ok) {
+    if (response.status === 401 && path !== '/auth/login') window.dispatchEvent(new Event('auth-required'));
     const result = await response.json() as { error: string };
     throw new Error(result.error);
   }

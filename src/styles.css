@@ -395,3 +395,31 @@ dialog.modal .form-actions { padding: 17px 25px; background: #fafcf7; margin: 0;
   .quote-totals, .quote-footer { break-inside: avoid; }
   .quote-sheet, .badge, .data-table th { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 }
+
+.auth-page { min-height: 100vh; display: grid; grid-template-columns: 1fr 460px; gap: 70px; align-items: center; max-width: 1120px; padding: 48px 40px; margin: auto; }
+.auth-brand { display: flex; align-items: center; gap: 12px; font-weight: 600; font-size: 20px; margin-bottom: 60px; }
+.auth-intro h1 { font-size: 42px; line-height: 1.5; letter-spacing: -1px; margin-bottom: 22px; }
+.auth-intro > p:not(.eyebrow) { color: var(--muted); line-height: 2; font-size: 14px; }
+.auth-workspace { display: inline-flex; align-items: center; gap: 8px; margin-top: 30px; color: var(--green); font-size: 12px; }
+.auth-card { margin: 0; box-shadow: 0 16px 60px #173f350a; }
+.auth-card .card-body { padding: 36px; }
+.auth-card h2 { font-size: 24px; margin-bottom: 12px; }
+.auth-fields { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.auth-fields .field, .auth-fields .helper-text { margin-bottom: 0; }
+.auth-fields .helper-text { margin-top: -8px; }
+.auth-submit { margin-top: 8px; width: 100%; }
+.auth-help { text-align: center; margin-top: 20px; }
+.auth-loading { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; gap: 14px; }
+.account-card { max-width: 560px; }
+.user-actions { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 850px) {
+  .auth-page { grid-template-columns: 1fr; max-width: 500px; gap: 28px; padding: 32px 20px; }
+  .auth-brand { margin-bottom: 0; }
+  .auth-intro > h1, .auth-intro > p, .auth-workspace { display: none; }
+}
+@media (max-width: 560px) {
+  .auth-card .card-body { padding: 26px 22px; }
+  .topbar .breadcrumb { gap: 5px; font-size: 11px; }
+  .topbar .topbar-actions { gap: 8px; }
+  .topbar .avatar { flex-shrink: 0; }
+}
