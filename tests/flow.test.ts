@@ -14,7 +14,7 @@ import { InquiryDetail } from '../src/pages/InquiryDetail.tsx';
 import { createApp } from '../server/app.ts';
 import { createDatabase } from '../server/db.ts';
 import type { SessionState } from '../shared/auth.ts';
-import type { AppState, FollowUp, Inquiry, InquiryInput, Product, Quote, QuoteInput } from '../shared/domain.ts';
+import type { AppState, FollowUp, Inquiry, InquiryInput, Product, ProductImportPreview, ProductImportResult, Quote, QuoteInput } from '../shared/domain.ts';
 
 const productInput = { sku: 'BR-6204', name: '深沟球轴承', specification: '6204-2RS / 20×47×14 mm', unit: '件', priceCents: 1990 };
 const inquiryInput: InquiryInput = {
@@ -127,6 +127,85 @@ test('CSV 按行报告错误，重复或无效的批次不会部分写入', asyn
   const state = (await call<AppState>('/state')).body;
   assert.deepEqual(state.products.map(product => product.sku).sort(), ['A', 'B']);
   assert.equal(state.products.find(product => product.sku === 'A')?.priceCents, 1990);
+});
+
+test('批量调价先预览再提交，保留商品资料与历史报价，未变商品不写入', async t => {
+  const call = await startApp(t);
+  const product = (await call<Product>('/products', 'POST', productInput)).body;
+  const unchanged = (await call<Product>('/products', 'POST', { ...productInput, sku: 'KEEP', priceCents: 120 })).body;
+  const inquiry = (await call<Inquiry>('/inquiries', 'POST', inquiryInput)).body;
+  const quote = (await call<Quote>('/quotes', 'POST', {
+    inquiryId: inquiry.id, sellerName: '测试配件商', validUntil: '2027-01-31', taxIncluded: true,
+    notes: '已议价，款到发货', shippingCents: 1000,
+    items: [{ productId: product.id, quantity: 2, unitPriceCents: 1800 }],
+  })).body;
+  const csv = 'sku,name,specification,unit,price\nBR-6204,供应商新名称,供应商规格,箱,25.00\nKEEP,忽略名称,忽略规格,箱,1.20\nNEW,新密封圈,N10,包,3.50';
+  const before = (await call<AppState>('/state')).body;
+  const preview = await call<ProductImportPreview>('/products/import/preview', 'POST', { csv });
+  assert.equal(preview.status, 200);
+  assert.deepEqual(preview.body.rows.map(row => row.status), ['update', 'unchanged', 'new']);
+  assert.deepEqual((await call<AppState>('/state')).body, before);
+  assert.deepEqual(preview.body.rows[0], {
+    line: 2, status: 'update', sku: product.sku, name: product.name, specification: product.specification,
+    unit: product.unit, priceCents: 2500, oldPriceCents: 1990,
+  });
+  const result = await call<ProductImportResult>('/products/import', 'POST', { csv, fingerprint: preview.body.fingerprint });
+  assert.equal(result.status, 201);
+  assert.deepEqual(result.body, { count: 3, added: 1, updated: 1, unchanged: 1 });
+  const after = (await call<AppState>('/state')).body;
+  const updated = after.products.find(item => item.id === product.id)!;
+  assert.deepEqual(updated, { ...product, priceCents: 2500, updatedAt: updated.updatedAt });
+  assert.ok(updated.updatedAt >= product.updatedAt);
+  assert.deepEqual(after.products.find(item => item.id === unchanged.id), unchanged);
+  assert.equal(after.products.length, 3);
+  const added = after.products.find(item => item.sku === 'NEW')!;
+  assert.deepEqual([added.name, added.specification, added.unit, added.priceCents], ['新密封圈', 'N10', '包', 350]);
+  assert.deepEqual(after.quotes, [quote]);
+});
+
+test('导入预览同时列出重复和无效行，确认错误批次不改价也不新增', async t => {
+  const call = await startApp(t);
+  await call<Product>('/products', 'POST', productInput);
+  const before = (await call<AppState>('/state')).body;
+  const csv = 'sku,name,specification,unit,price\nBR-6204,轴承,6204,件,25.00\nNEW,新商品,N10,件,3.50\nDUP,商品一,M8,件,1.00\nDUP,商品二,M10,件,2.00\nBAD,负价格商品,M12,件,-1.00\nEMPTY,,M14,件,4.00';
+  const preview = await call<ProductImportPreview>('/products/import/preview', 'POST', { csv });
+  assert.equal(preview.status, 200);
+  assert.deepEqual(preview.body.rows.filter(row => row.status === 'error').map(row => row.line), [5, 6, 7]);
+  assert.deepEqual((await call<AppState>('/state')).body, before);
+  const result = await call<{ error: string }>('/products/import', 'POST', { csv, fingerprint: preview.body.fingerprint });
+  assert.equal(result.status, 400);
+  assert.match(result.body.error, /第 5 行/);
+  assert.match(result.body.error, /第 6 行/);
+  assert.match(result.body.error, /第 7 行/);
+  assert.deepEqual((await call<AppState>('/state')).body, before);
+});
+
+test('预览后改价或插入同名 SKU 会阻止整批提交，重新预览后才能确认', async t => {
+  const call = await startApp(t);
+  const product = (await call<Product>('/products', 'POST', productInput)).body;
+  const csv = 'sku,name,specification,unit,price\nBR-6204,轴承,6204,件,25.00\nNEW,新商品,N10,件,3.50';
+  const first = (await call<ProductImportPreview>('/products/import/preview', 'POST', { csv })).body;
+  await call(`/products/${product.id}`, 'PUT', { ...productInput, priceCents: 2200 });
+  const afterEdit = (await call<AppState>('/state')).body;
+  const conflict = await call<{ error: string }>('/products/import', 'POST', { csv, fingerprint: first.fingerprint });
+  assert.equal(conflict.status, 409);
+  assert.match(conflict.body.error, /重新预览/);
+  assert.deepEqual((await call<AppState>('/state')).body, afterEdit);
+
+  const second = (await call<ProductImportPreview>('/products/import/preview', 'POST', { csv })).body;
+  await call('/products', 'POST', { ...productInput, sku: 'NEW', name: '已人工维护的商品', priceCents: 400 });
+  const afterInsert = (await call<AppState>('/state')).body;
+  assert.equal((await call('/products/import', 'POST', { csv, fingerprint: second.fingerprint })).status, 409);
+  assert.deepEqual((await call<AppState>('/state')).body, afterInsert);
+
+  const current = (await call<ProductImportPreview>('/products/import/preview', 'POST', { csv })).body;
+  const confirmed = await call<ProductImportResult>('/products/import', 'POST', { csv, fingerprint: current.fingerprint });
+  assert.equal(confirmed.status, 201);
+  assert.deepEqual(confirmed.body, { count: 2, added: 0, updated: 2, unchanged: 0 });
+  const after = (await call<AppState>('/state')).body;
+  assert.equal(after.products.find(item => item.id === product.id)!.priceCents, 2500);
+  assert.equal(after.products.find(item => item.sku === 'NEW')!.priceCents, 350);
+  assert.equal(after.products.find(item => item.sku === 'NEW')!.name, '已人工维护的商品');
 });
 
 test('无效输入和不存在的商品不能产生半份报价或无效询盘', async t => {

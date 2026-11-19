@@ -54,6 +54,11 @@ export const extractionSchema = z.object({
 });
 export type ProductInput = z.infer<typeof productInputSchema>;
 export type Product = ProductInput & { id: string; createdAt: string; updatedAt: string };
+export type ProductImportRow = (ProductInput & {
+  line: number; status: 'new' | 'update' | 'unchanged'; oldPriceCents: number | null;
+}) | { line: number; sku: string; name: string; status: 'error'; message: string };
+export type ProductImportPreview = { fingerprint: string; rows: ProductImportRow[] };
+export type ProductImportResult = { count: number; added: number; updated: number; unchanged: number };
 export type InquiryInput = z.infer<typeof inquiryInputSchema>;
 export type Inquiry = InquiryInput & { id: string; code: string; createdAt: string; updatedAt: string };
 export type QuoteInput = z.infer<typeof quoteInputSchema>;

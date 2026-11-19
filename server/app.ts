@@ -3,22 +3,16 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parse } from 'csv-parse/sync';
 import { z, ZodError } from 'zod';
 import {
-  centsSchema, productInputSchema, inquiryInputSchema, quoteInputSchema, followUpInputSchema, statusSchema,
+  productInputSchema, inquiryInputSchema, quoteInputSchema, followUpInputSchema, statusSchema,
   type Product, type Inquiry, type Quote, type FollowUp, type AppState,
 } from '../shared/domain.ts';
-import { parseMoney } from '../shared/quote.ts';
 import { extractInquiry, type AppConfig } from './ai.ts';
 import { createQuote, HttpError, readRecord, readRecords, transaction } from './store.ts';
 import { seedDemo } from './demo.ts';
 import { authRouter } from './auth.ts';
-
-const csvProductSchema = productInputSchema.omit({ priceCents: true }).extend({
-  price: z.string().regex(/^\d{1,7}(\.\d{1,2})?$/, '价格必须为非负金额，最多两位小数')
-    .transform(parseMoney).pipe(centsSchema),
-});
+import { previewProductImport } from './product-import.ts';
 
 export function createApp(db: DatabaseSync, config: AppConfig) {
   const app = express();
@@ -71,48 +65,45 @@ export function createApp(db: DatabaseSync, config: AppConfig) {
     res.json(product);
   });
 
-  app.post('/api/products/import', (req, res) => {
+  app.post('/api/products/import/preview', (req, res) => {
     const input = z.object({ csv: z.string().min(1).max(2_000_000) }).parse(req.body);
-    const rows = (() => {
-      try {
-        return parse<{ record: { sku: string; name: string; specification: string; unit: string; price: string }; info: { lines: number } }>(input.csv, {
-          bom: true, skip_empty_lines: true, trim: true, info: true,
-          columns: (header: string[]) => {
-            if (header.join(',') !== 'sku,name,specification,unit,price') {
-              throw new HttpError(400, '第 1 行表头必须为 sku,name,specification,unit,price，请使用导入模板');
-            }
-            return header;
-          },
-        });
-      } catch (error) {
-        if (error instanceof HttpError) throw error;
-        throw new HttpError(400, 'CSV 格式无法解析，请检查引号、分隔符和每行的列数');
+    res.json(previewProductImport(db, input.csv));
+  });
+
+  app.post('/api/products/import', (req, res) => {
+    const input = z.object({ csv: z.string().min(1).max(2_000_000), fingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional() }).parse(req.body);
+    const result = transaction(db, () => {
+      const preview = previewProductImport(db, input.csv);
+      if (input.fingerprint && preview.fingerprint !== input.fingerprint) {
+        throw new HttpError(409, '商品目录或导入内容已变化，请重新预览后确认');
       }
-    })();
-    if (rows.length === 0) throw new HttpError(400, 'CSV 至少需要表头和一行商品');
-    if (rows.length > 5000) throw new HttpError(400, '每次最多导入 5000 件商品');
-    const seen = new Set<string>();
-    const existing = new Set(readRecords<Product>(db, 'products').map(product => product.sku));
-    const now = new Date().toISOString();
-    const products = rows.map(row => {
-      const parsed = csvProductSchema.safeParse(row.record);
-      if (!parsed.success) {
-        throw new HttpError(400, `第 ${row.info.lines} 行：${parsed.error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('；')}`);
+      const errors = preview.rows.filter(row => row.status === 'error');
+      if (errors.length) throw new HttpError(400, errors.map(row => `第 ${row.line} 行：${row.message}`).join('；'));
+      const rows = preview.rows.filter(row => row.status !== 'error');
+      const existingRow = !input.fingerprint && rows.find(row => row.status !== 'new');
+      if (existingRow) throw new HttpError(409, `第 ${existingRow.line} 行：SKU ${existingRow.sku} 已存在于商品目录`);
+      const now = new Date().toISOString();
+      const insert = db.prepare('INSERT INTO products (id, sku, data) VALUES (?, ?, ?)');
+      const update = db.prepare('UPDATE products SET data = ? WHERE sku = ?');
+      const existing = new Map(readRecords<Product>(db, 'products').map(product => [product.sku, product]));
+      for (const row of rows) {
+        if (row.status === 'unchanged') continue;
+        if (row.status === 'update') {
+          update.run(JSON.stringify({ ...existing.get(row.sku)!, priceCents: row.priceCents, updatedAt: now }), row.sku);
+          continue;
+        }
+        const product: Product = {
+          id: randomUUID(), sku: row.sku, name: row.name, specification: row.specification,
+          unit: row.unit, priceCents: row.priceCents, createdAt: now, updatedAt: now,
+        };
+        insert.run(product.id, product.sku, JSON.stringify(product));
       }
-      if (seen.has(parsed.data.sku)) throw new HttpError(400, `第 ${row.info.lines} 行：SKU ${parsed.data.sku} 在文件中重复`);
-      if (existing.has(parsed.data.sku)) throw new HttpError(409, `第 ${row.info.lines} 行：SKU ${parsed.data.sku} 已存在于商品目录`);
-      seen.add(parsed.data.sku);
-      const product: Product = {
-        id: randomUUID(), sku: parsed.data.sku, name: parsed.data.name, specification: parsed.data.specification,
-        unit: parsed.data.unit, priceCents: parsed.data.price, createdAt: now, updatedAt: now,
+      return {
+        count: rows.length, added: rows.filter(row => row.status === 'new').length,
+        updated: rows.filter(row => row.status === 'update').length, unchanged: rows.filter(row => row.status === 'unchanged').length,
       };
-      return product;
     });
-    transaction(db, () => {
-      const statement = db.prepare('INSERT INTO products (id, sku, data) VALUES (?, ?, ?)');
-      for (const product of products) statement.run(product.id, product.sku, JSON.stringify(product));
-    });
-    res.status(201).json({ count: products.length });
+    res.status(201).json(result);
   });
 
   app.post('/api/inquiries', (req, res) => {
