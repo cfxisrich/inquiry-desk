@@ -46,3 +46,8 @@ CREATE TABLE IF NOT EXISTS followups (
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS followups_inquiry ON followups(inquiry_id);
+
+UPDATE inquiries SET data = json_set(data, '$.revision', 1)
+WHERE json_type(data, '$.revision') IS NULL;
+UPDATE inquiries SET data = json_set(data, '$.missingFields', json('[]'))
+WHERE json_type(data, '$.missingFields') IS NULL;

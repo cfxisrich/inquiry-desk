@@ -21,7 +21,7 @@ export function seedDemo(db: DatabaseSync, companyName: string) {
   ];
   const inquiries: Inquiry[] = [
     {
-      id: 'demo-i1', code: 'IN-00001', customer: '恒川自动化', contact: '陈工 · chen@example.com', source: 'email',
+      id: 'demo-i1', revision: 1, missingFields: [], code: 'IN-00001', customer: '恒川自动化', contact: '陈工 · chen@example.com', source: 'email',
       originalText: '【演示询盘】您好，我们生产线需要 6204-ZZ 轴承 200 件，以及 M12 NPN 常开接近开关 30 件，请报含税价和运费。希望下周能到货。',
       notes: '客户关注交期，报价前确认现货数量。', status: 'new', nextFollowUp: day(0),
       items: [
@@ -30,35 +30,35 @@ export function seedDemo(db: DatabaseSync, companyName: string) {
       ], createdAt: now, updatedAt: now,
     },
     {
-      id: 'demo-i2', code: 'IN-00002', customer: '远山机械', contact: '李经理 · li@example.com', source: 'chat',
+      id: 'demo-i2', revision: 1, missingFields: [], code: 'IN-00002', customer: '远山机械', contact: '李经理 · li@example.com', source: 'chat',
       originalText: '【演示询盘】4V210-08 电磁阀需要 50 件，DC24V。请报价，月底维修用。',
       notes: '已确认接口 G1/4，等待最终报价。', status: 'quoting', nextFollowUp: day(0),
       items: [{ description: '气动电磁阀', model: '4V210-08', specification: 'DC24V · G1/4', quantity: 50, unit: '件', productId: 'demo-p4' }],
       createdAt: now, updatedAt: now,
     },
     {
-      id: 'demo-i3', code: 'IN-00003', customer: '启明精工', contact: '王工 · wang@example.com', source: 'email',
+      id: 'demo-i3', revision: 1, missingFields: [], code: 'IN-00003', customer: '启明精工', contact: '王工 · wang@example.com', source: 'email',
       originalText: '【演示询盘】想采购 6205-2RS 轴承 300 件，请发一份含税报价单，收货地苏州。',
       notes: '已发送报价，今天确认客户反馈。', status: 'quoted', nextFollowUp: day(-1),
       items: [{ description: '密封深沟球轴承', model: '6205-2RS', specification: '橡胶密封', quantity: 300, unit: '件', productId: 'demo-p2' }],
       createdAt: now, updatedAt: now,
     },
     {
-      id: 'demo-i4', code: 'IN-00004', customer: '青禾包装设备', contact: '周女士 · zhou@example.com', source: 'phone',
+      id: 'demo-i4', revision: 1, missingFields: [], code: 'IN-00004', customer: '青禾包装设备', contact: '周女士 · zhou@example.com', source: 'phone',
       originalText: '【演示询盘】包装机用的同步带要补货，HTD 5M，长度和数量稍后发。',
       notes: '待补充：同步带周长、宽度、采购数量。', status: 'new', nextFollowUp: day(1),
       items: [{ description: '工业同步带', model: 'HTD 5M', specification: '', quantity: null, unit: '件', productId: null }],
       createdAt: now, updatedAt: now,
     },
     {
-      id: 'demo-i5', code: 'IN-00005', customer: '云帆制造', contact: '赵工 · zhao@example.com', source: 'email',
+      id: 'demo-i5', revision: 1, missingFields: [], code: 'IN-00005', customer: '云帆制造', contact: '赵工 · zhao@example.com', source: 'email',
       originalText: '【演示询盘】LM25 联轴器，8×10 孔径，100 件，请安排报价。',
       notes: '客户已确认订单，进入交付。', status: 'won', nextFollowUp: null,
       items: [{ description: '梅花弹性联轴器', model: 'LM25', specification: '孔径 8 × 10 mm', quantity: 100, unit: '件', productId: 'demo-p5' }],
       createdAt: now, updatedAt: now,
     },
     {
-      id: 'demo-i6', code: 'IN-00006', customer: '新程机电', contact: '许先生 · xu@example.com', source: 'chat',
+      id: 'demo-i6', revision: 1, missingFields: [], code: 'IN-00006', customer: '新程机电', contact: '许先生 · xu@example.com', source: 'chat',
       originalText: '【演示询盘】M12 NPN 接近开关需要 80 件，能提供报价吗？',
       notes: '已报价，客户正在内部审批。', status: 'quoted', nextFollowUp: day(2),
       items: [{ description: '电感式接近开关', model: 'M12', specification: 'NPN 常开', quantity: 80, unit: '件', productId: 'demo-p3' }],

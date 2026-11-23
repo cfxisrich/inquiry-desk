@@ -4,6 +4,8 @@ export const statusLabels = { new: '待处理', quoting: '待报价', quoted: '�
 export const sourceLabels = { email: '邮件', chat: '聊天', phone: '电话', other: '其他' } as const;
 export const statusSchema = z.enum(['new', 'quoting', 'quoted', 'won', 'lost']);
 export const dateSchema = z.iso.date();
+export const revisionSchema = z.number().int().positive();
+const missingFieldsSchema = z.array(z.string().trim().min(1).max(300)).max(30);
 export const centsSchema = z.number().int().min(0).max(100_000_000);
 export const productInputSchema = z.object({
   sku: z.string().trim().min(1, 'SKU 不能为空').max(80),
@@ -29,6 +31,7 @@ export const inquiryInputSchema = z.object({
   status: statusSchema,
   nextFollowUp: dateSchema.nullable(),
   items: z.array(inquiryItemSchema).max(100),
+  missingFields: missingFieldsSchema.default([]),
 });
 export const quoteInputSchema = z.object({
   inquiryId: z.string().min(1),
@@ -50,7 +53,7 @@ export const followUpInputSchema = z.object({
 export const extractionSchema = z.object({
   customer: z.string().max(200), contact: z.string().max(300),
   items: z.array(inquiryItemSchema.omit({ productId: true })).max(100),
-  missingFields: z.array(z.string().max(300)).max(30),
+  missingFields: missingFieldsSchema,
 });
 export type ProductInput = z.infer<typeof productInputSchema>;
 export type Product = ProductInput & { id: string; createdAt: string; updatedAt: string };
@@ -60,7 +63,7 @@ export type ProductImportRow = (ProductInput & {
 export type ProductImportPreview = { fingerprint: string; rows: ProductImportRow[] };
 export type ProductImportResult = { count: number; added: number; updated: number; unchanged: number };
 export type InquiryInput = z.infer<typeof inquiryInputSchema>;
-export type Inquiry = InquiryInput & { id: string; code: string; createdAt: string; updatedAt: string };
+export type Inquiry = InquiryInput & { id: string; code: string; revision: number; createdAt: string; updatedAt: string };
 export type QuoteInput = z.infer<typeof quoteInputSchema>;
 export type Quote = Omit<QuoteInput, 'items'> & {
   id: string; code: string; version: number; customer: string; contact: string;

@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z, ZodError } from 'zod';
 import {
-  productInputSchema, inquiryInputSchema, quoteInputSchema, followUpInputSchema, statusSchema,
+  productInputSchema, inquiryInputSchema, quoteInputSchema, followUpInputSchema, statusSchema, revisionSchema,
   type Product, type Inquiry, type Quote, type FollowUp, type AppState,
 } from '../shared/domain.ts';
 import { extractInquiry, type AppConfig } from './ai.ts';
@@ -114,28 +114,40 @@ export function createApp(db: DatabaseSync, config: AppConfig) {
     const now = new Date().toISOString();
     const serial = (db.prepare('SELECT COUNT(*) AS count FROM inquiries').get() as { count: number }).count + 1;
     const inquiry: Inquiry = {
-      ...input, id: randomUUID(), code: `IN-${String(serial).padStart(5, '0')}`, createdAt: now, updatedAt: now,
+      ...input, id: randomUUID(), code: `IN-${String(serial).padStart(5, '0')}`, revision: 1, createdAt: now, updatedAt: now,
     };
     db.prepare('INSERT INTO inquiries (id, code, data) VALUES (?, ?, ?)').run(inquiry.id, inquiry.code, JSON.stringify(inquiry));
     res.status(201).json(inquiry);
   });
 
+  app.get('/api/inquiries/:id', (req, res) => {
+    res.json(readRecord<Inquiry>(db, 'inquiries', req.params.id));
+  });
+
   app.put('/api/inquiries/:id', (req, res) => {
-    const input = inquiryInputSchema.parse(req.body);
-    const original = readRecord<Inquiry>(db, 'inquiries', req.params.id);
-    for (const item of input.items) {
-      if (item.productId !== null) readRecord<Product>(db, 'products', item.productId);
-    }
-    const inquiry: Inquiry = { ...original, ...input, updatedAt: new Date().toISOString() };
-    db.prepare('UPDATE inquiries SET data = ? WHERE id = ?').run(JSON.stringify(inquiry), inquiry.id);
+    const input = inquiryInputSchema.extend({ revision: revisionSchema }).parse(req.body);
+    const inquiry = transaction(db, () => {
+      const original = readRecord<Inquiry>(db, 'inquiries', req.params.id);
+      if (input.revision !== original.revision) throw new HttpError(409, '这条询盘已被更新，请保留本地修改并载入最新版本后核对');
+      for (const item of input.items) {
+        if (item.productId !== null) readRecord<Product>(db, 'products', item.productId);
+      }
+      const inquiry: Inquiry = { ...original, ...input, revision: original.revision + 1, updatedAt: new Date().toISOString() };
+      db.prepare('UPDATE inquiries SET data = ? WHERE id = ?').run(JSON.stringify(inquiry), inquiry.id);
+      return inquiry;
+    });
     res.json(inquiry);
   });
 
   app.patch('/api/inquiries/:id/status', (req, res) => {
-    const input = z.object({ status: statusSchema }).parse(req.body);
-    const original = readRecord<Inquiry>(db, 'inquiries', req.params.id);
-    const inquiry: Inquiry = { ...original, status: input.status, updatedAt: new Date().toISOString() };
-    db.prepare('UPDATE inquiries SET data = ? WHERE id = ?').run(JSON.stringify(inquiry), inquiry.id);
+    const input = z.object({ status: statusSchema, revision: revisionSchema }).parse(req.body);
+    const inquiry = transaction(db, () => {
+      const original = readRecord<Inquiry>(db, 'inquiries', req.params.id);
+      if (input.revision !== original.revision) throw new HttpError(409, '这条询盘已被更新，请保留本地修改并载入最新版本后核对');
+      const inquiry: Inquiry = { ...original, status: input.status, revision: original.revision + 1, updatedAt: new Date().toISOString() };
+      db.prepare('UPDATE inquiries SET data = ? WHERE id = ?').run(JSON.stringify(inquiry), inquiry.id);
+      return inquiry;
+    });
     res.json(inquiry);
   });
 
@@ -149,32 +161,35 @@ export function createApp(db: DatabaseSync, config: AppConfig) {
   });
 
   app.post('/api/quotes/:id/sent', (req, res) => {
-    const original = readRecord<Quote>(db, 'quotes', req.params.id);
-    if (original.sentAt) {
-      res.json(original);
-      return;
-    }
-    const quote = { ...original, sentAt: new Date().toISOString() };
-    transaction(db, () => {
+    const quote = transaction(db, () => {
+      const original = readRecord<Quote>(db, 'quotes', req.params.id);
+      if (original.sentAt) return original;
+      const quote = { ...original, sentAt: new Date().toISOString() };
       db.prepare('UPDATE quotes SET data = ? WHERE id = ?').run(JSON.stringify(quote), quote.id);
       const inquiry = readRecord<Inquiry>(db, 'inquiries', quote.inquiryId);
       if (inquiry.status !== 'won' && inquiry.status !== 'lost') {
         db.prepare('UPDATE inquiries SET data = ? WHERE id = ?')
-          .run(JSON.stringify({ ...inquiry, status: 'quoted', updatedAt: quote.sentAt }), inquiry.id);
+          .run(JSON.stringify({ ...inquiry, status: 'quoted', revision: inquiry.revision + 1, updatedAt: quote.sentAt }), inquiry.id);
       }
+      return quote;
     });
     res.json(quote);
   });
 
   app.post('/api/followups', (req, res) => {
-    const input = followUpInputSchema.parse(req.body);
-    const inquiry = readRecord<Inquiry>(db, 'inquiries', input.inquiryId);
-    const followUp: FollowUp = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
-    transaction(db, () => {
+    const input = followUpInputSchema.extend({ revision: revisionSchema }).parse(req.body);
+    const followUp = transaction(db, () => {
+      const inquiry = readRecord<Inquiry>(db, 'inquiries', input.inquiryId);
+      if (input.revision !== inquiry.revision) throw new HttpError(409, '这条询盘已被更新，请保留本地修改并载入最新版本后核对');
+      const followUp: FollowUp = {
+        inquiryId: input.inquiryId, note: input.note, nextFollowUp: input.nextFollowUp,
+        id: randomUUID(), createdAt: new Date().toISOString(),
+      };
       db.prepare('INSERT INTO followups (id, inquiry_id, data) VALUES (?, ?, ?)')
         .run(followUp.id, followUp.inquiryId, JSON.stringify(followUp));
       db.prepare('UPDATE inquiries SET data = ? WHERE id = ?')
-        .run(JSON.stringify({ ...inquiry, nextFollowUp: input.nextFollowUp, updatedAt: followUp.createdAt }), inquiry.id);
+        .run(JSON.stringify({ ...inquiry, nextFollowUp: input.nextFollowUp, revision: inquiry.revision + 1, updatedAt: followUp.createdAt }), inquiry.id);
+      return followUp;
     });
     res.status(201).json(followUp);
   });

@@ -1,5 +1,11 @@
 import { useState } from 'react';
 
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
 export async function api<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
   const response = await fetch(`/api${path}`, body === undefined
     ? { method: 'GET' }
@@ -7,7 +13,7 @@ export async function api<T>(path: string, body?: unknown, method = 'POST'): Pro
   if (!response.ok) {
     if (response.status === 401 && path !== '/auth/login') window.dispatchEvent(new Event('auth-required'));
     const result = await response.json() as { error: string };
-    throw new Error(result.error);
+    throw new ApiError(response.status, result.error);
   }
   return response.json() as Promise<T>;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Boxes, CalendarClock, ChevronRight, FileText, LayoutDashboard, MessageSquareText, Plus, ShieldCheck, Sparkles, UsersRound } from 'lucide-react';
 import type { AppState } from '../shared/domain';
 import type { SessionState, User } from '../shared/auth';
@@ -45,14 +45,38 @@ export default function App() {
 
 function Workspace({ user, onSignedOut }: { user: User; onSignedOut: (message: string) => void }) {
   const [route, setRoute] = useState(location.hash.slice(1) || 'dashboard');
+  const routeHash = useRef(location.hash);
+  const dirty = useRef(false);
+  const onDirtyChange = useCallback((value: boolean) => {
+    if ((routeHash.current.slice(1) || 'dashboard') === route) dirty.current = value;
+  }, [route]);
   const [data, setData] = useState<AppState | null>(null);
   const [error, setError] = useState('');
   const refresh = async () => { setData(await api<AppState>('/state')); };
   useEffect(() => {
     void api<AppState>('/state').then(setData).catch((error: Error) => setError(error.message));
-    const onHash = () => { setRoute(location.hash.slice(1) || 'dashboard'); window.scrollTo(0, 0); };
+    const onHash = () => {
+      if (location.hash === routeHash.current) return;
+      if (dirty.current && !window.confirm('询盘中有未保存的修改，确定放弃并离开吗？')) {
+        history.replaceState(history.state, '', `${location.pathname}${location.search}${routeHash.current}`);
+        return;
+      }
+      dirty.current = false;
+      routeHash.current = location.hash;
+      setRoute(location.hash.slice(1) || 'dashboard');
+      window.scrollTo(0, 0);
+    };
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!dirty.current) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
     window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      window.removeEventListener('hashchange', onHash);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
   }, []);
   const page = route.split('?')[0];
   const filter = new URLSearchParams(route.split('?')[1]).get('filter') ?? 'all';
@@ -75,7 +99,7 @@ function Workspace({ user, onSignedOut }: { user: User; onSignedOut: (message: s
         {!data && !error && <div className="empty-state"><span className="loading-dot" /><p>正在打开工作空间…</p></div>}
         {data && active === 'dashboard' && <Dashboard data={data} refresh={refresh} />}
         {data && page === 'inquiries' && <Inquiries key={route} data={data} initialFilter={filter} />}
-        {data && (route === 'new' || route.startsWith('inquiry/')) && <InquiryDetail key={route} data={data} inquiry={data.inquiries.find(item => item.id === route.split('/')[1])} isNew={route === 'new'} refresh={refresh} />}
+        {data && (route === 'new' || route.startsWith('inquiry/')) && <InquiryDetail key={route} data={data} inquiry={data.inquiries.find(item => item.id === route.split('/')[1])} isNew={route === 'new'} refresh={refresh} onDirtyChange={onDirtyChange} />}
         {data && route === 'products' && <Products data={data} refresh={refresh} />}
         {data && page === 'quotes' && <Quotes key={route} data={data} initialFilter={filter} />}
         {data && route.startsWith('quote/') && <QuoteDetail data={data} quote={data.quotes.find(item => item.id === route.split('/')[1])} refresh={refresh} />}

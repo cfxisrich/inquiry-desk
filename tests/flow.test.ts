@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -20,7 +21,7 @@ const productInput = { sku: 'BR-6204', name: '深沟球轴承', specification: '
 const inquiryInput: InquiryInput = {
   customer: '华东设备有限公司', contact: '张经理 / sales@example.test', source: 'email',
   originalText: '需要 6204-2RS 轴承 2 件，请含税报价，运费另列。',
-  notes: '', status: 'new', nextFollowUp: null, items: [],
+  notes: '', status: 'new', nextFollowUp: null, items: [], missingFields: [],
 };
 
 async function startApp(t: TestContext, path = ':memory:') {
@@ -74,6 +75,7 @@ test('报价金额、版本和快照在商品及客户变更后保持正确', as
   })).status, 200);
   assert.equal((await call<Inquiry>(`/inquiries/${inquiry.body.id}`, 'PUT', {
     ...inquiryInput, customer: '新客户名称', contact: '李经理',
+    revision: (await call<Inquiry>("/inquiries/" + inquiry.body.id)).body.revision,
   })).status, 200);
   const v2 = await call<Quote>('/quotes', 'POST', {
     ...input, items: [{ productId: product.body.id, quantity: 2, unitPriceCents: 2500 }],
@@ -91,7 +93,9 @@ test('报价金额、版本和快照在商品及客户变更后保持正确', as
   assert.equal(sent.status, 200);
   assert.ok(sent.body.sentAt);
   assert.equal((await call<AppState>('/state')).body.inquiries[0].status, 'quoted');
-  assert.equal((await call(`/inquiries/${inquiry.body.id}/status`, 'PATCH', { status: 'won' })).status, 200);
+  assert.equal((await call(`/inquiries/${inquiry.body.id}/status`, 'PATCH', {
+    status: 'won', revision: (await call<Inquiry>(`/inquiries/${inquiry.body.id}`)).body.revision,
+  })).status, 200);
   const sentAgain = await call<Quote>(`/quotes/${v1.body.id}/sent`, 'POST', {});
   assert.equal(sentAgain.body.sentAt, sent.body.sentAt);
   assert.equal((await call<Quote>(`/quotes/${v2.body.id}/sent`, 'POST', {})).status, 200);
@@ -243,12 +247,13 @@ test('跟进改期更新询盘，清空下一次日期后保留历史记录', as
   const call = await startApp(t);
   const inquiry = (await call<Inquiry>('/inquiries', 'POST', inquiryInput)).body;
   const first = await call<FollowUp>('/followups', 'POST', {
-    inquiryId: inquiry.id, note: '客户确认数量，周五再联系。', nextFollowUp: '2027-01-15',
+    inquiryId: inquiry.id, revision: inquiry.revision, note: '客户确认数量，周五再联系。', nextFollowUp: '2027-01-15',
   });
   assert.equal(first.status, 201);
   assert.equal((await call<AppState>('/state')).body.inquiries[0].nextFollowUp, '2027-01-15');
   assert.equal((await call('/followups', 'POST', {
-    inquiryId: inquiry.id, note: '已完成沟通，等待客户安排。', nextFollowUp: null,
+    inquiryId: inquiry.id, revision: (await call<Inquiry>("/inquiries/" + inquiry.id)).body.revision,
+    note: '已完成沟通，等待客户安排。', nextFollowUp: null,
   })).status, 201);
   const state = (await call<AppState>('/state')).body;
   assert.equal(state.inquiries[0].nextFollowUp, null);
@@ -275,12 +280,16 @@ test('关闭数据库后重新打开，商品、询盘、报价和跟进仍然�
     const call = await startApp(t, databasePath);
     const product = (await call<Product>('/products', 'POST', productInput)).body;
     const inquiry = (await call<Inquiry>('/inquiries', 'POST', inquiryInput)).body;
+    assert.equal((await call('/inquiries/' + inquiry.id, 'PUT', {
+      ...inquiry, missingFields: ['请确认交期', '请确认付款方式'],
+    })).status, 200);
     assert.equal((await call('/quotes', 'POST', {
       inquiryId: inquiry.id, sellerName: '持久化测试', validUntil: '2027-01-31', taxIncluded: true,
       shippingCents: 1000, notes: '重启后保留', items: [{ productId: product.id, quantity: 2, unitPriceCents: 1990 }],
     })).status, 201);
     assert.equal((await call('/followups', 'POST', {
-      inquiryId: inquiry.id, note: '重启前的沟通记录', nextFollowUp: '2027-01-15',
+      inquiryId: inquiry.id, revision: (await call<Inquiry>("/inquiries/" + inquiry.id)).body.revision,
+      note: '重启前的沟通记录', nextFollowUp: '2027-01-15',
     })).status, 201);
   });
   await t.test('新的服务实例读到已保存内容', async t => {
@@ -289,6 +298,8 @@ test('关闭数据库后重新打开，商品、询盘、报价和跟进仍然�
     assert.equal(state.products[0].sku, productInput.sku);
     assert.equal(state.inquiries[0].originalText, inquiryInput.originalText);
     assert.equal(state.inquiries[0].nextFollowUp, '2027-01-15');
+    assert.deepEqual(state.inquiries[0].missingFields, ['请确认交期', '请确认付款方式']);
+    assert.equal(state.inquiries[0].revision, 4);
     assert.equal(state.quotes[0].totalCents, 4980);
     assert.equal(state.quotes[0].notes, '重启后保留');
     assert.equal(state.followUps[0].note, '重启前的沟通记录');
@@ -357,11 +368,107 @@ test('空搜索不展开整个商品目录，型号候选优先精确匹配并�
     ...data.products[0], id: `product-${index}`, sku: `MODEL-${index}`, specification: '',
   }));
   inquiry.items[0] = { ...inquiry.items[0], model: '', productId: 'product-4999' };
-  const empty = renderToStaticMarkup(createElement(InquiryDetail, { data, inquiry, isNew: false, refresh: async () => {} }));
+  const empty = renderToStaticMarkup(createElement(InquiryDetail, { data, inquiry, isNew: false, refresh: async () => {}, onDirtyChange: () => {} }));
   assert.match(empty, /value="product-4999"/);
   assert.doesNotMatch(empty, /value="product-0"/);
   inquiry.items[0] = { ...inquiry.items[0], model: ' model-49 ', productId: null };
-  const matched = renderToStaticMarkup(createElement(InquiryDetail, { data, inquiry, isNew: false, refresh: async () => {} }));
+  const matched = renderToStaticMarkup(createElement(InquiryDetail, { data, inquiry, isNew: false, refresh: async () => {}, onDirtyChange: () => {} }));
   assert.equal((matched.match(/<option value="product-/g) ?? []).length, 3);
   assert.ok(matched.indexOf('<option value="product-49"') < matched.indexOf('<option value="product-490"'));
+});
+
+
+test('两个编辑副本保存时校验版本，旧内容不能覆盖新内容或写入跟进', async t => {
+  const call = await startApp(t);
+  const created = (await call<Inquiry>('/inquiries', 'POST', inquiryInput)).body;
+  const firstEditor = (await call<Inquiry>(`/inquiries/${created.id}`)).body;
+  const secondEditor = (await call<Inquiry>(`/inquiries/${created.id}`)).body;
+  assert.equal(firstEditor.revision, 1);
+  assert.deepEqual(secondEditor, firstEditor);
+  const saved = await call<Inquiry>(`/inquiries/${created.id}`, 'PUT', {
+    ...firstEditor, notes: '第一位业务员的新备注', missingFields: ['请确认交期'],
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.revision, 2);
+  const current = (await call<AppState>('/state')).body;
+  const staleSave = await call<{ error: string }>(`/inquiries/${created.id}`, 'PUT', {
+    ...secondEditor, notes: '第二位业务员的旧草稿', missingFields: [],
+  });
+  assert.equal(staleSave.status, 409);
+  assert.ok(staleSave.body.error.length > 0);
+  assert.equal((await call(`/inquiries/${created.id}/status`, 'PATCH', {
+    status: 'lost', revision: secondEditor.revision,
+  })).status, 409);
+  assert.equal((await call('/followups', 'POST', {
+    inquiryId: created.id, revision: secondEditor.revision, note: '旧页面的跟进', nextFollowUp: '2027-02-01',
+  })).status, 409);
+  assert.deepEqual((await call<AppState>('/state')).body, current);
+  assert.equal((await call(`/inquiries/${created.id}`, 'PUT', inquiryInput)).status, 400);
+  assert.equal((await call(`/inquiries/${created.id}/status`, 'PATCH', { status: 'lost' })).status, 400);
+  assert.equal((await call('/followups', 'POST', {
+    inquiryId: created.id, note: '未提供版本', nextFollowUp: null,
+  })).status, 400);
+  assert.deepEqual((await call<AppState>('/state')).body, current);
+  const resolved = await call<Inquiry>(`/inquiries/${created.id}`, 'PUT', {
+    ...saved.body, notes: '重新核对后的内容', missingFields: [],
+  });
+  assert.equal(resolved.status, 200);
+  assert.equal(resolved.body.revision, 3);
+  assert.deepEqual((await call<Inquiry>(`/inquiries/${created.id}`)).body, resolved.body);
+});
+
+test('生成报价、标记发送和记录跟进会使旧询盘编辑版本失效', async t => {
+  const call = await startApp(t);
+  const product = (await call<Product>('/products', 'POST', productInput)).body;
+  const initial = (await call<Inquiry>('/inquiries', 'POST', { ...inquiryInput, missingFields: ['请确认收货地址'] })).body;
+  const quote = await call<Quote>('/quotes', 'POST', {
+    inquiryId: initial.id, sellerName: '配件商', validUntil: '2027-01-31', taxIncluded: true,
+    shippingCents: 0, notes: '', items: [{ productId: product.id, quantity: 2, unitPriceCents: 1990 }],
+  });
+  assert.equal(quote.status, 201);
+  const afterQuote = (await call<Inquiry>(`/inquiries/${initial.id}`)).body;
+  assert.equal(afterQuote.status, 'quoting');
+  assert.equal(afterQuote.revision, initial.revision + 1);
+  assert.equal((await call(`/inquiries/${initial.id}`, 'PUT', initial)).status, 409);
+  assert.equal((await call(`/quotes/${quote.body.id}/sent`, 'POST', {})).status, 200);
+  const afterSent = (await call<Inquiry>(`/inquiries/${initial.id}`)).body;
+  assert.equal(afterSent.status, 'quoted');
+  assert.equal(afterSent.revision, afterQuote.revision + 1);
+  assert.equal((await call(`/inquiries/${initial.id}`, 'PUT', afterQuote)).status, 409);
+  assert.equal((await call(`/quotes/${quote.body.id}/sent`, 'POST', {})).status, 200);
+  assert.deepEqual((await call<Inquiry>(`/inquiries/${initial.id}`)).body, afterSent);
+  assert.equal((await call('/followups', 'POST', {
+    inquiryId: initial.id, revision: afterSent.revision, note: '客户希望月底交付', nextFollowUp: '2027-01-20',
+  })).status, 201);
+  const afterFollowUp = (await call<Inquiry>(`/inquiries/${initial.id}`)).body;
+  assert.equal(afterFollowUp.revision, afterSent.revision + 1);
+  assert.equal(afterFollowUp.nextFollowUp, '2027-01-20');
+  assert.deepEqual(afterFollowUp.missingFields, initial.missingFields);
+  assert.equal((await call(`/inquiries/${initial.id}`, 'PUT', afterSent)).status, 409);
+  assert.deepEqual((await call<Inquiry>(`/inquiries/${initial.id}`)).body, afterFollowUp);
+  assert.equal((await call<AppState>('/state')).body.followUps.length, 1);
+});
+
+test('旧库询盘补齐版本和待确认项，已有版本与原始内容保持不变', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'inquiry-revision-test-'));
+  const databasePath = join(directory, 'inquiry.sqlite');
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec('CREATE TABLE inquiries (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, data TEXT NOT NULL CHECK (json_valid(data))) STRICT');
+  const oldInquiry = {
+    id: 'old-inquiry', code: 'IN-00001', customer: '历史客户', contact: '张经理', source: 'email',
+    originalText: '原始询盘内容', notes: '迁移前的备注', status: 'quoted', nextFollowUp: '2027-01-15',
+    items: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z',
+  };
+  const existing = { ...oldInquiry, id: 'versioned-inquiry', code: 'IN-00002', revision: 7, missingFields: ['已有待确认事项'] };
+  legacy.prepare('INSERT INTO inquiries (id, code, data) VALUES (?, ?, ?)').run(oldInquiry.id, oldInquiry.code, JSON.stringify(oldInquiry));
+  legacy.prepare('INSERT INTO inquiries (id, code, data) VALUES (?, ?, ?)').run(existing.id, existing.code, JSON.stringify(existing));
+  legacy.close();
+  const call = await startApp(t, databasePath);
+  t.after(() => rmSync(directory, { recursive: true }));
+  assert.deepEqual((await call<Inquiry>(`/inquiries/${oldInquiry.id}`)).body, { ...oldInquiry, revision: 1, missingFields: [] });
+  assert.deepEqual((await call<Inquiry>(`/inquiries/${existing.id}`)).body, existing);
+  const state = (await call<AppState>('/state')).body;
+  assert.equal(state.inquiries.length, 2);
+  assert.equal(state.quotes.length, 0);
+  assert.equal(state.followUps.length, 0);
 });

@@ -35,14 +35,14 @@ export function transaction<T>(db: DatabaseSync, action: () => T) {
 }
 
 export function createQuote(db: DatabaseSync, input: QuoteInput) {
-  const inquiry = readRecord<Inquiry>(db, 'inquiries', input.inquiryId);
   const totals = quoteTotals(input.items, input.shippingCents);
   if (!Number.isSafeInteger(totals.totalCents)) throw new HttpError(400, '报价总额超出可准确计算的范围');
-  const items = input.items.map(item => {
-    const product = readRecord<Product>(db, 'products', item.productId);
-    return { ...item, sku: product.sku, name: product.name, specification: product.specification, unit: product.unit };
-  });
   return transaction(db, () => {
+    const inquiry = readRecord<Inquiry>(db, 'inquiries', input.inquiryId);
+    const items = input.items.map(item => {
+      const product = readRecord<Product>(db, 'products', item.productId);
+      return { ...item, sku: product.sku, name: product.name, specification: product.specification, unit: product.unit };
+    });
     const version = (db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM quotes WHERE inquiry_id = ?')
       .get(input.inquiryId) as { version: number }).version + 1;
     const quote: Quote = {
@@ -54,7 +54,7 @@ export function createQuote(db: DatabaseSync, input: QuoteInput) {
       .run(quote.id, quote.inquiryId, quote.version, JSON.stringify(quote));
     if (inquiry.status === 'new') {
       db.prepare('UPDATE inquiries SET data = ? WHERE id = ?')
-        .run(JSON.stringify({ ...inquiry, status: 'quoting', updatedAt: quote.createdAt }), inquiry.id);
+        .run(JSON.stringify({ ...inquiry, status: 'quoting', revision: inquiry.revision + 1, updatedAt: quote.createdAt }), inquiry.id);
     }
     return quote;
   });
